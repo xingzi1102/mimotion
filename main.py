@@ -15,27 +15,97 @@ from util.aes_help import encrypt_data, decrypt_data
 import util.zepp_helper as zeppHelper
 import util.push_util as push_util
 
+# ---------- 新增：调度过滤函数 ----------
+def should_run_now():
+    """根据北京时间判断当前是否在允许执行的时间表内（不限制分钟）"""
+    now = datetime.now(pytz.timezone('Asia/Shanghai'))
+    weekday = now.weekday()   # 0=周一, 4=周五, 5=周六, 6=周日
+    hour = now.hour
+
+    # 周一至周四 (0-3) 8-21点
+    if weekday in (0, 1, 2, 3) and 8 <= hour <= 21:
+        return True
+    # 周五 (4) ：9点 或 12-21点
+    if weekday == 4 and (hour == 9 or (12 <= hour <= 21)):
+        return True
+    # 周六 (5) 8-21点
+    if weekday == 5 and 8 <= hour <= 21:
+        return True
+    # 周日 (6) 8-21点
+    if weekday == 6 and 8 <= hour <= 21:
+        return True
+    return False
+
+
+# ---------- 修改：按星期和小时生成步数范围 ----------
+def get_min_max_by_time(hour=None, minute=None):
+    """
+    根据星期几和当前小时计算步数范围（下限，上限）
+    规则：
+    - 周一至周四：8:00 从3000开始线性增长，21:00 达到 (12000, 16000)
+    - 周五：9:00 固定 (3000, 4000)；12:00-21:00 从4000开始线性增长，21:00 达到 (10000, 12000)
+    - 周六：8:00 从3000开始线性增长，21:00 达到 (19000, 21000)
+    - 周日：8:00 从3000开始线性增长，21:00 达到 (9000, 10000)
+    """
+    if hour is None:
+        time_bj = datetime.now(pytz.timezone('Asia/Shanghai'))
+        hour = time_bj.hour
+        minute = time_bj.minute
+    weekday = datetime.now(pytz.timezone('Asia/Shanghai')).weekday()
+
+    def linear(start_h, start_min, start_max, end_h, end_min, end_max):
+        if hour < start_h:
+            return start_min, start_max
+        if hour >= end_h:
+            return end_min, end_max
+        ratio = (hour - start_h) / (end_h - start_h)
+        min_step = int(start_min + (end_min - start_min) * ratio)
+        max_step = int(start_max + (end_max - start_max) * ratio)
+        return max(min_step, 500), max(max_step, min_step + 200)
+
+    # 周一至周四
+    if weekday in (0, 1, 2, 3):
+        if 8 <= hour <= 21:
+            min_step, max_step = linear(8, 3000, 3000, 21, 12000, 16000)
+        else:
+            min_step = max_step = 3000
+        return min_step, max_step
+
+    # 周五
+    if weekday == 4:
+        if hour == 9:
+            return 3000, 4000
+        elif 12 <= hour <= 21:
+            return linear(12, 4000, 4000, 21, 10000, 12000)
+        else:
+            return 3000, 3000
+
+    # 周六
+    if weekday == 5:
+        if 8 <= hour <= 21:
+            return linear(8, 3000, 3000, 21, 19000, 21000)
+        else:
+            return 3000, 3000
+
+    # 周日
+    if weekday == 6:
+        if 8 <= hour <= 21:
+            return linear(8, 3000, 3000, 21, 9000, 10000)
+        else:
+            return 3000, 3000
+
+    # fallback
+    return 3000, 3000
+
+
 # 获取默认值转int
 def get_int_value_default(_config: dict, _key, default):
     _config.setdefault(_key, default)
     return int(_config.get(_key))
 
 
-# 获取当前时间对应的最大和最小步数
-def get_min_max_by_time(hour=None, minute=None):
-    if hour is None:
-        hour = time_bj.hour
-    if minute is None:
-        minute = time_bj.minute
-    time_rate = min((hour * 60 + minute) / (22 * 60), 1)
-    min_step = get_int_value_default(config, 'MIN_STEP', 18000)
-    max_step = get_int_value_default(config, 'MAX_STEP', 25000)
-    return int(time_rate * min_step), int(time_rate * max_step)
-
-
 # 虚拟ip地址
 def fake_ip():
-    # 随便找的国内IP段：223.64.0.0 - 223.117.255.255
     return f"{223}.{random.randint(64, 117)}.{random.randint(0, 255)}.{random.randint(0, 255)}"
 
 
@@ -50,7 +120,6 @@ def desensitize_user_name(user):
 # 获取北京时间
 def get_beijing_time():
     target_timezone = pytz.timezone('Asia/Shanghai')
-    # 获取当前时间
     return datetime.now().astimezone(target_timezone)
 
 
@@ -104,8 +173,6 @@ class MiMotionRunner:
         else:
             self.is_phone = False
         self.user = user
-        # self.fake_ip_addr = fake_ip()
-        # self.log_str += f"创建虚拟ip地址：{self.fake_ip_addr}\n"
 
     # 登录
     def login(self):
@@ -125,7 +192,6 @@ class MiMotionRunner:
                 return app_token
             else:
                 self.log_str += f"app_token失效 重新获取 last grant time: {user_token_info.get('app_token_time')}\n"
-                # 检查login_token是否可用
                 app_token, msg = zeppHelper.grant_app_token(login_token)
                 if app_token is None:
                     self.log_str += f"login_token 失效 重新获取 last grant time: {user_token_info.get('login_token_time')}\n"
@@ -152,7 +218,6 @@ class MiMotionRunner:
         if access_token is None:
             self.log_str += "登录获取accessToken失败：%s" % msg
             return None
-        # print(f"device_id:{self.device_id} isPhone: {self.is_phone}")
         login_token, app_token, user_id, msg = zeppHelper.grant_login_tokens(access_token, self.device_id,
                                                                              self.is_phone)
         if login_token is None:
@@ -164,7 +229,6 @@ class MiMotionRunner:
         user_token_info["login_token"] = login_token
         user_token_info["app_token"] = app_token
         user_token_info["user_id"] = user_id
-        # 记录token获取时间
         user_token_info["access_token_time"] = get_time()
         user_token_info["login_token_time"] = get_time()
         user_token_info["app_token_time"] = get_time()
@@ -210,6 +274,11 @@ def run_single_account(total, idx, user_mi, passwd_mi):
 
 
 def execute():
+    # 在开始执行前进行时间过滤
+    if not should_run_now():
+        print(f"[{format_now()}] 当前时间不在预定的执行计划内（星期或小时不符），脚本退出")
+        return
+
     user_list = users.split('#')
     passwd_list = passwords.split('#')
     exec_results = []
@@ -225,7 +294,6 @@ def execute():
                 exec_results.append(run_single_account(total, idx, user_mi, passwd_mi))
                 idx += 1
                 if idx < total:
-                    # 每个账号之间间隔一定时间请求一次，避免接口请求过于频繁导致异常
                     time.sleep(sleep_seconds)
         if encrypt_support:
             persist_user_tokens()
@@ -250,7 +318,6 @@ def prepare_user_tokens() -> dict:
             data = f.read()
         try:
             decrypted_data = decrypt_data(data, aes_key, None)
-            # 假设原始明文为 UTF-8 编码文本
             return json.loads(decrypted_data.decode('utf-8', errors='strict'))
         except:
             print("密钥不正确或者加密内容损坏 放弃token")
@@ -288,7 +355,6 @@ if __name__ == "__main__":
         print("未配置CONFIG变量，无法执行")
         exit(1)
     else:
-        # region 初始化参数
         config = dict()
         try:
             config = dict(json.loads(os.environ.get("CONFIG")))
@@ -296,7 +362,7 @@ if __name__ == "__main__":
             print("CONFIG格式不正确，请检查Secret配置，请严格按照JSON格式：使用双引号包裹字段和值，逗号不能多也不能少")
             traceback.print_exc()
             exit(1)
-        # 创建推送配置对象
+
         push_config = push_util.PushConfig(
             push_plus_token=config.get('PUSH_PLUS_TOKEN'),
             push_plus_hour=config.get('PUSH_PLUS_HOUR'),
@@ -314,12 +380,15 @@ if __name__ == "__main__":
         if users is None or passwords is None:
             print("未正确配置账号密码，无法执行")
             exit(1)
+
+        # 获取步数范围（使用新的按星期/小时算法）
         min_step, max_step = get_min_max_by_time()
+
         use_concurrent = config.get('USE_CONCURRENT')
         if use_concurrent is not None and use_concurrent == 'True':
             use_concurrent = True
         else:
             print(f"多账号执行间隔：{sleep_seconds}")
             use_concurrent = False
-        # endregion
+
         execute()
