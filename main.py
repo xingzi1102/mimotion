@@ -15,7 +15,7 @@ from util.aes_help import encrypt_data, decrypt_data
 import util.zepp_helper as zeppHelper
 import util.push_util as push_util
 
-# ---------- 新增：调度过滤函数 ----------
+# ---------- 调度过滤函数 ----------
 def should_run_now():
     """根据北京时间判断当前是否在允许执行的时间表内（不限制分钟）"""
     now = datetime.now(pytz.timezone('Asia/Shanghai'))
@@ -25,8 +25,8 @@ def should_run_now():
     # 周一至周四 (0-3) 8-21点
     if weekday in (0, 1, 2, 3) and 8 <= hour <= 21:
         return True
-    # 周五 (4) ：9点 或 12-21点
-    if weekday == 4 and (hour == 9 or (12 <= hour <= 21)):
+    # 周五 (4) ：8点 或 12-21点
+    if weekday == 4 and (hour == 8 or (12 <= hour <= 21)):
         return True
     # 周六 (5) 8-21点
     if weekday == 5 and 8 <= hour <= 21:
@@ -37,15 +37,15 @@ def should_run_now():
     return False
 
 
-# ---------- 修改：按星期和小时生成步数范围 ----------
+# ---------- 步数范围生成函数（按星期和小时）----------
 def get_min_max_by_time(hour=None, minute=None):
     """
     根据星期几和当前小时计算步数范围（下限，上限）
     规则：
-    - 周一至周四：8:00 从3000开始线性增长，21:00 达到 (12000, 16000)
-    - 周五：9:00 固定 (3000, 4000)；12:00-21:00 从4000开始线性增长，21:00 达到 (10000, 12000)
-    - 周六：8:00 从3000开始线性增长，21:00 达到 (19000, 21000)
-    - 周日：8:00 从3000开始线性增长，21:00 达到 (9000, 10000)
+    - 周一至周四：8:00 (3000~3500) 线性增长，21:00 达到 (12000, 16000)
+    - 周五：8:00 (3000~3500)；12:00 起点 (3500~4000) 线性增长，21:00 达到 (10000, 12000)
+    - 周六：8:00 (3000~3500) 线性增长，21:00 达到 (19000, 21000)
+    - 周日：8:00 (2000~3000) 线性增长，21:00 达到 (9000, 10000)
     """
     if hour is None:
         time_bj = datetime.now(pytz.timezone('Asia/Shanghai'))
@@ -66,36 +66,35 @@ def get_min_max_by_time(hour=None, minute=None):
     # 周一至周四
     if weekday in (0, 1, 2, 3):
         if 8 <= hour <= 21:
-            min_step, max_step = linear(8, 3000, 3000, 21, 12000, 16000)
+            return linear(8, 3000, 3500, 21, 12000, 16000)
         else:
-            min_step = max_step = 3000
-        return min_step, max_step
+            return 3000, 3500   # 不在运行时段的理论值
 
     # 周五
     if weekday == 4:
-        if hour == 9:
-            return 3000, 4000
+        if hour == 8:
+            return 3000, 3500
         elif 12 <= hour <= 21:
-            return linear(12, 4000, 4000, 21, 10000, 12000)
+            return linear(12, 3500, 4000, 21, 10000, 12000)
         else:
-            return 3000, 3000
+            return 3000, 3500
 
     # 周六
     if weekday == 5:
         if 8 <= hour <= 21:
-            return linear(8, 3000, 3000, 21, 19000, 21000)
+            return linear(8, 3000, 3500, 21, 19000, 21000)
         else:
-            return 3000, 3000
+            return 3000, 3500
 
     # 周日
     if weekday == 6:
         if 8 <= hour <= 21:
-            return linear(8, 3000, 3000, 21, 9000, 10000)
+            return linear(8, 2000, 3000, 21, 9000, 10000)
         else:
-            return 3000, 3000
+            return 2000, 3000
 
     # fallback
-    return 3000, 3000
+    return 3000, 3500
 
 
 # 获取默认值转int
