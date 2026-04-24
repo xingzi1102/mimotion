@@ -15,45 +15,59 @@ from util.aes_help import encrypt_data, decrypt_data
 import util.zepp_helper as zeppHelper
 import util.push_util as push_util
 
-# ---------- 调度过滤函数 ----------
+
+# ---------- 调度过滤：始终允许执行（因为实际执行时间会动态匹配最近计划小时） ----------
 def should_run_now():
-    """根据北京时间判断当前是否在允许执行的时间表内（不限制分钟）"""
-    now = datetime.now(pytz.timezone('Asia/Shanghai'))
-    weekday = now.weekday()   # 0=周一, 4=周五, 5=周六, 6=周日
-    hour = now.hour
-
-    # 周一至周四 (0-3) 8-21点
-    if weekday in (0, 1, 2, 3) and 8 <= hour <= 21:
-        return True
-    # 周五 (4) ：8点 或 12-21点
-    if weekday == 4 and (hour == 8 or (12 <= hour <= 21)):
-        return True
-    # 周六 (5) 8-21点
-    if weekday == 5 and 8 <= hour <= 21:
-        return True
-    # 周日 (6) 8-21点
-    if weekday == 6 and 8 <= hour <= 21:
-        return True
-    return False
+    """不再根据小时过滤，任何时间都允许，让步数函数自动匹配最近计划时间"""
+    # 但仍可检查星期几？所有星期都有计划，所以直接返回 True
+    return True
 
 
-# ---------- 步数范围生成函数（按星期和小时）----------
+# ---------- 获取当天所有计划小时列表 ----------
+def get_planned_hours(weekday):
+    """根据星期几返回当天所有计划执行的小时（北京时间整点）"""
+    # 周一至周四 (0-3)
+    if weekday in (0, 1, 2, 3):
+        return list(range(8, 22))   # 8,9,10,...,21
+    # 周五 (4)
+    elif weekday == 4:
+        return [8] + list(range(12, 22))  # 8,12,13,...,21
+    # 周六 (5)
+    elif weekday == 5:
+        return list(range(8, 22))
+    # 周日 (6)
+    elif weekday == 6:
+        return list(range(8, 22))
+    else:
+        return []
+
+
+# ---------- 步数范围生成函数（自动匹配最近计划小时） ----------
 def get_min_max_by_time(hour=None, minute=None):
     """
-    根据星期几和当前小时计算步数范围（下限，上限）
-    规则：
-    - 周一至周四：8:00 (3000~3500) 线性增长，21:00 达到 (12000, 16000)
-    - 周五：8:00 (3000~3500)；12:00 起点 (3500~4000) 线性增长，21:00 达到 (10000, 12000)
-    - 周六：8:00 (3000~3500) 线性增长，21:00 达到 (19000, 21000)
-    - 周日：8:00 (2000~3000) 线性增长，21:00 达到 (9000, 10000)
+    根据当前时间，找到当天计划小时中最接近的一个，然后计算该小时的步数范围。
+    如果当前时间与多个计划小时距离相同，取较晚的那个（例如 8:00 距离 8:00 和 9:00 都是 0 和 1 小时，取 8:00）。
     """
-    if hour is None:
-        time_bj = datetime.now(pytz.timezone('Asia/Shanghai'))
-        hour = time_bj.hour
-        minute = time_bj.minute
-    weekday = datetime.now(pytz.timezone('Asia/Shanghai')).weekday()
+    now = datetime.now(pytz.timezone('Asia/Shanghai'))
+    weekday = now.weekday()
+    current_time = now.replace(second=0, microsecond=0)  # 精确到分钟
 
-    def linear(start_h, start_min, start_max, end_h, end_min, end_max):
+    # 获取当天的计划小时列表
+    planned_hours = get_planned_hours(weekday)
+    if not planned_hours:
+        # 理论上不会发生，但保险返回默认值
+        return 3000, 3500
+
+    # 构建每个计划小时对应的 datetime 对象（当天）
+    base_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    planned_times = [base_date.replace(hour=h) for h in planned_hours]
+
+    # 找出与当前时间最接近的计划时间（按绝对时间差，秒为单位）
+    nearest_time = min(planned_times, key=lambda dt: abs((current_time - dt).total_seconds()))
+    target_hour = nearest_time.hour
+
+    # 线性插值辅助函数（与原始逻辑一致）
+    def linear(start_h, start_min, start_max, end_h, end_min, end_max, hour):
         if hour < start_h:
             return start_min, start_max
         if hour >= end_h:
@@ -63,40 +77,27 @@ def get_min_max_by_time(hour=None, minute=None):
         max_step = int(start_max + (end_max - start_max) * ratio)
         return max(min_step, 500), max(max_step, min_step + 200)
 
+    # 根据星期几和 target_hour 计算步数范围
     # 周一至周四
     if weekday in (0, 1, 2, 3):
-        if 8 <= hour <= 21:
-            return linear(8, 3000, 3500, 21, 12000, 16000)
-        else:
-            return 3000, 3500   # 不在运行时段的理论值
-
+        return linear(8, 3000, 3500, 21, 12000, 16000, target_hour)
     # 周五
-    if weekday == 4:
-        if hour == 8:
+    elif weekday == 4:
+        if target_hour == 8:
             return 3000, 3500
-        elif 12 <= hour <= 21:
-            return linear(12, 3500, 4000, 21, 10000, 12000)
         else:
-            return 3000, 3500
-
+            return linear(12, 3500, 4000, 21, 10000, 12000, target_hour)
     # 周六
-    if weekday == 5:
-        if 8 <= hour <= 21:
-            return linear(8, 3000, 3500, 21, 19000, 21000)
-        else:
-            return 3000, 3500
-
+    elif weekday == 5:
+        return linear(8, 3000, 3500, 21, 19000, 21000, target_hour)
     # 周日
-    if weekday == 6:
-        if 8 <= hour <= 21:
-            return linear(8, 2000, 3000, 21, 9000, 10000)
-        else:
-            return 2000, 3000
-
-    # fallback
-    return 3000, 3500
+    elif weekday == 6:
+        return linear(8, 2000, 3000, 21, 9000, 10000, target_hour)
+    else:
+        return 3000, 3500
 
 
+# ---------- 以下是原始代码（未改动） ----------
 # 获取默认值转int
 def get_int_value_default(_config: dict, _key, default):
     _config.setdefault(_key, default)
@@ -273,9 +274,9 @@ def run_single_account(total, idx, user_mi, passwd_mi):
 
 
 def execute():
-    # 在开始执行前进行时间过滤
+    # 不再限制时间，直接执行（should_run_now 始终 True）
     if not should_run_now():
-        print(f"[{format_now()}] 当前时间不在预定的执行计划内（星期或小时不符），脚本退出")
+        print(f"[{format_now()}] 今天没有执行计划，脚本退出")
         return
 
     user_list = users.split('#')
@@ -380,7 +381,7 @@ if __name__ == "__main__":
             print("未正确配置账号密码，无法执行")
             exit(1)
 
-        # 获取步数范围（使用新的按星期/小时算法）
+        # 获取步数范围（自动匹配最近计划时间）
         min_step, max_step = get_min_max_by_time()
 
         use_concurrent = config.get('USE_CONCURRENT')
