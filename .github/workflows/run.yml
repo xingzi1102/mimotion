@@ -2,7 +2,7 @@ name: 刷步数
 
 on:
   schedule:
-    - cron: '18 * * * *'   # 每小时整点触发一次（UTC时间）
+    - cron: '56 * * * *'   # 每小时整点触发一次（UTC时间）
   workflow_dispatch:
 
 jobs:
